@@ -42,14 +42,6 @@ def get_dividend_calendar(start_date_str, end_date_str):
     return records
 
 def get_stock_snapshot_tencent(sec_code):
-    """
-    騰訊財經公開接口：實時行情
-    字段位置（已確認）：
-    field[3]: 最新價
-    field[44]: 總市值（億港元）
-    field[60]: 每手股數
-    field[69]: 總股本
-    """
     tencent_code = f"hk{sec_code}"
     url = f"https://qt.gtimg.cn/q={tencent_code}"
     try:
@@ -65,7 +57,6 @@ def get_stock_snapshot_tencent(sec_code):
         if len(fields) < 70:
             return None
         
-        # field[3]: 最新價
         last_price = float(fields[3]) if fields[3] else 0.0
         
         # field[44]: 總市值（億港元）
@@ -78,7 +69,7 @@ def get_stock_snapshot_tencent(sec_code):
             except Exception:
                 pass
         
-        # 如果市值為0，用 股價×總股本(field[69]) 計算
+        # 後備：股價×總股本(field[69])
         if market_cap <= 0 and len(fields) > 69 and fields[69]:
             try:
                 total_shares = float(fields[69])
@@ -107,9 +98,6 @@ def get_stock_snapshot_tencent(sec_code):
         return None
 
 def get_20d_avg_turnover_tencent(sec_code):
-    """
-    騰訊財經公開K線接口：20日均成交額（港元）
-    """
     tencent_code = f"hk{sec_code}"
     url = f"https://web.ifzq.gtimg.cn/appstock/app/kline/kline?param={tencent_code},day,,,20,"
     try:
@@ -140,13 +128,11 @@ def get_20d_avg_turnover_tencent(sec_code):
                 if len(k) >= 6:
                     volume = float(k[5]) if k[5] else 0
                     close = float(k[2]) if k[2] else 0
-                    # 騰訊日K線第7個字段為成交額（如有）
                     if len(k) >= 7 and k[6]:
                         turnover = float(k[6])
                         if turnover > 10000:
                             turnovers.append(turnover)
                             continue
-                    # 否則 成交量×收盤價
                     if volume > 0 and close > 0:
                         turnovers.append(volume * close)
             except Exception:
@@ -159,9 +145,6 @@ def get_20d_avg_turnover_tencent(sec_code):
         return 0.0
 
 def get_annual_dividend(sec_code):
-    """
-    東方財富datacenter接口：過去12個月總派息
-    """
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     one_year_ago = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
     today = datetime.now().strftime("%Y-%m-%d")
@@ -274,6 +257,8 @@ def main():
     filtered_turnover = 0
     filtered_lot = 0
     
+    print("\n===== 通過市值過濾的股票明細 =====")
+    
     for idx, item in enumerate(div_records):
         raw_code = str(item.get("SECURITY_CODE", "")).zfill(5)
         name = item.get("SECURITY_NAME_ABBR", "")
@@ -311,6 +296,10 @@ def main():
             continue
             
         yield_pct = (dividend_hkd / last_price) * 100.0
+        
+        # 打印所有通過市值過濾的股票
+        print(f"  {name} ({raw_code}) | 股價:{last_price:.3f} | 市值:{market_cap/1e8:.1f}億 | 每股派息:{dividend_hkd:.4f} | 本次收益率:{yield_pct:.2f}% | 20日均額:{avg_turnover/1e4:.0f}萬 | 每手:{lot_size}")
+        
         if yield_pct < 3.0:
             filtered_yield += 1
             continue
@@ -351,7 +340,7 @@ def main():
     if not df.empty:
         df = df.drop_duplicates(subset=["code"])
         df = df.sort_values(by="yield_pct", ascending=False)
-        print("\n===== 篩選結果 =====")
+        print("\n===== 最終篩選結果 =====")
         print(df[["code", "name", "dividend_per_share", "yield_pct", "dividend_per_lot"]].to_string(index=False))
     
     push_to_feishu_card(df, start_date, end_date)
