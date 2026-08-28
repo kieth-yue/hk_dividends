@@ -2,13 +2,14 @@ name: HK Stock Dividend Scanner
 
 on:
   schedule:
-    # 這是 UTC 的週日至週四 19:30，對應香港時間的週一至週五 03:30
+    # UTC 週日至週四 19:30 = 香港時間 週一至週五 03:30
     - cron: '30 19 * * 0-4'
   workflow_dispatch:
 
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
