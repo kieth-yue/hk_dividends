@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
@@ -6,13 +7,13 @@ from datetime import datetime, timedelta
 FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK")
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://data.eastmoney.com/"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Referer": "https://gu.qq.com/"
 }
 
 def get_dividend_calendar(start_date_str, end_date_str):
     """
-    東方財富datacenter接口：分紅日曆
+    東方財富datacenter接口：分紅日曆（已確認海外可訪問）
     """
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     page = 1
@@ -32,11 +33,9 @@ def get_dividend_calendar(start_date_str, end_date_str):
             resp = requests.get(url, params=params, headers=HEADERS, timeout=10).json()
             if not resp.get("success") or not resp.get("result"):
                 break
-            
             data = resp["result"].get("data", [])
             if not data:
                 break
-            
             records.extend(data)
             if page >= resp["result"].get("pages", 1):
                 break
@@ -47,45 +46,50 @@ def get_dividend_calendar(start_date_str, end_date_str):
     
     return records
 
-def get_stock_snapshot(sec_code, debug=False):
+def get_stock_snapshot_tencent(sec_code):
     """
-    東方財富push2接口：行情快照
+    騰訊財經公開接口：實時行情
+    返回：最新價、總市值（港元）、每手股數
     """
-    sec_id = f"116.{sec_code}"
-    # 請求更多字段，方便調試
-    url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={sec_id}&fields=f43,f57,f58,f116,f162,f163,f164,f167,f168,f169,f170,f171,f29,f152"
+    tencent_code = f"hk{sec_code}"
+    url = f"https://qt.gtimg.cn/q={tencent_code}"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=8)
-        if debug:
-            print(f"  [DEBUG] {sec_code} HTTP狀態: {resp.status_code}")
-            print(f"  [DEBUG] 返回內容前300字: {resp.text[:300]}")
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp.encoding = "gbk"
+        text = resp.text.strip()
         
-        data = resp.json().get("data")
-        if not data:
+        # 解析騰訊行情格式：v_hk00700="00700~騰訊控股~00700~價格~昨收~..."
+        match = re.search(r'="([^"]+)"', text)
+        if not match:
             return None
         
-        if debug:
-            print(f"  [DEBUG] 解析數據: {data}")
+        fields = match.group(1).split("~")
+        if len(fields) < 50:
+            return None
         
-        # f43: 最新價，港股需要除以1000
-        f43 = data.get("f43")
-        last_price = f43 / 1000.0 if f43 and f43 != "-" else 0.0
+        # 字段位置（騰訊港股行情）：
+        # fields[3]: 當前價
+        # fields[4]: 昨收
+        # fields[45]: 總市值（億港元）
+        # fields[48]: 每手股數
+        last_price = float(fields[3]) if fields[3] else 0.0
         
-        # f116: 總市值
-        f116 = data.get("f116")
-        market_cap = float(f116) if f116 and f116 != "-" else 0.0
+        market_cap = 0.0
+        if len(fields) > 45 and fields[45]:
+            try:
+                market_cap = float(fields[45]) * 100_000_000  # 億轉港元
+            except Exception:
+                pass
         
-        # f162: 每手股數
-        f162 = data.get("f162")
-        lot_size = int(f162) if f162 and f162 != "-" else 0
+        lot_size = 0
+        if len(fields) > 48 and fields[48]:
+            try:
+                lot_size = int(fields[48])
+            except Exception:
+                pass
         
-        # 如果f162為0，嘗試其他常見字段
-        if lot_size <= 0:
-            for alt_field in ["f163", "f164", "f152"]:
-                val = data.get(alt_field)
-                if val and val != "-" and int(val) > 0:
-                    lot_size = int(val)
-                    break
+        if last_price <= 0:
+            return None
         
         return {
             "last_price": last_price,
@@ -93,24 +97,43 @@ def get_stock_snapshot(sec_code, debug=False):
             "lot_size": lot_size
         }
     except Exception as e:
-        if debug:
-            print(f"  [DEBUG] 請求異常: {e}")
+        print(f"  騰訊行情請求失敗 {sec_code}: {e}")
         return None
 
-def get_20d_avg_turnover(sec_code):
+def get_20d_avg_turnover_tencent(sec_code):
     """
-    東方財富push2his接口：20日均成交額
+    騰訊財經公開K線接口：20日均成交額（港元）
     """
-    sec_id = f"116.{sec_code}"
-    url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={sec_id}&klt=101&fqt=1&lmt=20&end=20500101&fields1=f1,f2,f3&fields2=f51,f56"
+    tencent_code = f"hk{sec_code}"
+    url = f"https://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get?param={tencent_code},day,,,20,qfq"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=8).json()
-        klines = resp.get("data", {}).get("klines", [])
-        if not klines:
+        resp = requests.get(url, headers=HEADERS, timeout=10).json()
+        data = resp.get("data", {}).get(tencent_code, {})
+        
+        # 騰訊K線數據在 day 或 hkday 字段
+        klines = data.get("day") or data.get("hkday") or []
+        if not klines or len(klines) < 5:
             return 0.0
-        turnovers = [float(k.split(",")[1]) for k in klines]
+        
+        # 每條K線格式：[日期, 開盤, 收盤, 最高, 最低, 成交量, ...]
+        # 成交額需要單獨計算：成交量 × 收盤價（近似）
+        # 或者直接用接口返回的成交額字段
+        turnovers = []
+        for k in klines[-20:]:
+            if len(k) >= 7:
+                # 第6個字段是成交量（股），乘以收盤價得到成交額
+                volume = float(k[5]) if k[5] else 0
+                close = float(k[2]) if k[2] else 0
+                turnovers.append(volume * close)
+            elif len(k) >= 6:
+                volume = float(k[5]) if k[5] else 0
+                close = float(k[2]) if k[2] else 0
+                turnovers.append(volume * close)
+        
+        if not turnovers:
+            return 0.0
         return sum(turnovers) / len(turnovers)
-    except Exception:
+    except Exception as e:
         return 0.0
 
 def get_annual_dividend(sec_code):
@@ -138,16 +161,13 @@ def get_annual_dividend(sec_code):
             resp = requests.get(url, params=params, headers=HEADERS, timeout=10).json()
             if not resp.get("success") or not resp.get("result"):
                 break
-            
             data = resp["result"].get("data", [])
             if not data:
                 break
-            
             for item in data:
                 dps = item.get("DPS_HKD", 0)
                 if dps and float(dps) > 0:
                     total_div += float(dps)
-            
             if page >= resp["result"].get("pages", 1):
                 break
             page += 1
@@ -181,7 +201,7 @@ def push_to_feishu_card(df, start_date, end_date):
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"掃描區間：`{start_date}` 至 `{end_date}`\n篩選條件：**市值 > 50億** | **20日均額 > 3000萬** | **本次派息收益率 > 3%**\n排序規則：**本次派息收益率由高至低**\n數據源：東方財富公開API"
+                    "content": f"掃描區間：`{start_date}` 至 `{end_date}`\n篩選條件：**市值 > 50億** | **20日均額 > 3000萬** | **本次派息收益率 > 3%**\n排序規則：**本次派息收益率由高至低**\n數據源：東方財富 + 騰訊財經"
                 }
             },
             {"tag": "hr"}
@@ -220,9 +240,9 @@ def main():
     
     print(f"開始掃描除淨區間: {start_date} -> {end_date}")
     
-    # 1. 獲取派息日曆
+    # 1. 東方財富：分紅日曆
     div_records = get_dividend_calendar(start_date, end_date)
-    print(f"東方財富datacenter返回 {len(div_records)} 條派息記錄")
+    print(f"東方財富返回 {len(div_records)} 條派息記錄")
     
     if not div_records:
         print("該區間內未獲取到分紅記錄。")
@@ -234,7 +254,7 @@ def main():
     snap_fail = 0
     turnover_success = 0
     
-    # 2. 遍歷每檔股票
+    # 2. 遍歷處理
     for idx, item in enumerate(div_records):
         raw_code = str(item.get("SECURITY_CODE", "")).zfill(5)
         name = item.get("SECURITY_NAME_ABBR", "")
@@ -245,56 +265,37 @@ def main():
             continue
         dividend_hkd = float(dividend_hkd)
         
-        # 前3隻打印詳細調試信息
-        debug_mode = idx < 3
-        if debug_mode:
-            print(f"\n[DEBUG] 處理第 {idx+1} 隻: {name} ({raw_code})")
-        
-        snap = get_stock_snapshot(raw_code, debug=debug_mode)
+        # 騰訊行情
+        snap = get_stock_snapshot_tencent(raw_code)
         if not snap:
             snap_fail += 1
-            if debug_mode:
-                print(f"  [DEBUG] 快照獲取失敗")
             continue
         
         snap_success += 1
         
-        # 測試K線接口
-        avg_turnover = get_20d_avg_turnover(raw_code)
+        # 騰訊K線成交額
+        avg_turnover = get_20d_avg_turnover_tencent(raw_code)
         if avg_turnover > 0:
             turnover_success += 1
-        if debug_mode:
-            print(f"  [DEBUG] 20日均成交額: {avg_turnover:,.0f} 港元")
             
         market_cap = snap["market_cap"]
         last_price = snap["last_price"]
         lot_size = snap["lot_size"]
         
-        if debug_mode:
-            print(f"  [DEBUG] 股價: {last_price:.3f}, 市值: {market_cap/1e8:.2f}億, 每手: {lot_size}股")
-        
-        # 條件1: 市值 > 50億
+        # 條件1: 市值 > 50億港元
         if market_cap < 5_000_000_000:
-            if debug_mode:
-                print(f"  [DEBUG] 市值不足50億，跳過")
             continue
             
         if last_price <= 0 or lot_size <= 0:
-            if debug_mode:
-                print(f"  [DEBUG] 股價或每手股數無效，跳過")
             continue
             
         # 條件2: 本次派息收益率 > 3%
         yield_pct = (dividend_hkd / last_price) * 100.0
         if yield_pct < 3.0:
-            if debug_mode:
-                print(f"  [DEBUG] 收益率不足3%，跳過")
             continue
             
-        # 條件3: 20日均成交額 > 3000萬
+        # 條件3: 20日均成交額 > 3000萬港元
         if avg_turnover < 30_000_000:
-            if debug_mode:
-                print(f"  [DEBUG] 成交額不足3000萬，跳過")
             continue
         
         # 年度週息率
