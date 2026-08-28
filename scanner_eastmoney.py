@@ -12,8 +12,7 @@ HEADERS = {
 
 def get_dividend_calendar(start_date_str, end_date_str):
     """
-    東方財富官方公開API：獲取指定日期範圍內除淨的港股分紅數據
-    報表：RPT_HK_EXDIVIDEND
+    東方財富datacenter接口：分紅日曆
     """
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     page = 1
@@ -48,38 +47,64 @@ def get_dividend_calendar(start_date_str, end_date_str):
     
     return records
 
-def get_stock_snapshot(sec_code):
+def get_stock_snapshot(sec_code, debug=False):
     """
-    東方財富免費公開行情接口：最新價、市值、每手股數
+    東方財富push2接口：行情快照
     """
     sec_id = f"116.{sec_code}"
-    url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={sec_id}&fields=f43,f116,f162"
+    # 請求更多字段，方便調試
+    url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={sec_id}&fields=f43,f57,f58,f116,f162,f163,f164,f167,f168,f169,f170,f171,f29,f152"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=5).json()
-        data = resp.get("data")
+        resp = requests.get(url, headers=HEADERS, timeout=8)
+        if debug:
+            print(f"  [DEBUG] {sec_code} HTTP狀態: {resp.status_code}")
+            print(f"  [DEBUG] 返回內容前300字: {resp.text[:300]}")
+        
+        data = resp.json().get("data")
         if not data:
             return None
         
-        last_price = data.get("f43", 0) / 1000.0 if data.get("f43") != "-" else 0.0
-        market_cap = data.get("f116", 0)
-        lot_size = data.get("f162", 0)
+        if debug:
+            print(f"  [DEBUG] 解析數據: {data}")
+        
+        # f43: 最新價，港股需要除以1000
+        f43 = data.get("f43")
+        last_price = f43 / 1000.0 if f43 and f43 != "-" else 0.0
+        
+        # f116: 總市值
+        f116 = data.get("f116")
+        market_cap = float(f116) if f116 and f116 != "-" else 0.0
+        
+        # f162: 每手股數
+        f162 = data.get("f162")
+        lot_size = int(f162) if f162 and f162 != "-" else 0
+        
+        # 如果f162為0，嘗試其他常見字段
+        if lot_size <= 0:
+            for alt_field in ["f163", "f164", "f152"]:
+                val = data.get(alt_field)
+                if val and val != "-" and int(val) > 0:
+                    lot_size = int(val)
+                    break
         
         return {
             "last_price": last_price,
-            "market_cap": float(market_cap) if market_cap != "-" else 0.0,
-            "lot_size": int(lot_size) if lot_size != "-" else 0
+            "market_cap": market_cap,
+            "lot_size": lot_size
         }
-    except Exception:
+    except Exception as e:
+        if debug:
+            print(f"  [DEBUG] 請求異常: {e}")
         return None
 
 def get_20d_avg_turnover(sec_code):
     """
-    東方財富免費公開K線接口：20日均成交額
+    東方財富push2his接口：20日均成交額
     """
     sec_id = f"116.{sec_code}"
     url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={sec_id}&klt=101&fqt=1&lmt=20&end=20500101&fields1=f1,f2,f3&fields2=f51,f56"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=5).json()
+        resp = requests.get(url, headers=HEADERS, timeout=8).json()
         klines = resp.get("data", {}).get("klines", [])
         if not klines:
             return 0.0
@@ -90,7 +115,7 @@ def get_20d_avg_turnover(sec_code):
 
 def get_annual_dividend(sec_code):
     """
-    獲取過去12個月總派息（港元），計算年度週息率
+    東方財富datacenter接口：過去12個月總派息
     """
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     one_year_ago = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
@@ -132,7 +157,7 @@ def get_annual_dividend(sec_code):
     return total_div
 
 def push_to_feishu_card(df, start_date, end_date):
-    """將結果格式化為飛書富文本卡片發送"""
+    """飛書卡片推送"""
     if not FEISHU_WEBHOOK:
         print("未設定 FEISHU_WEBHOOK，略過推送。")
         return
@@ -189,16 +214,15 @@ def push_to_feishu_card(df, start_date, end_date):
         print(f"飛書推送失敗: {e}")
 
 def main():
-    # 1. 計算日期區間（今天起至未來第 7 天）
     today = datetime.now()
     start_date = today.strftime("%Y-%m-%d")
     end_date = (today + timedelta(days=7)).strftime("%Y-%m-%d")
     
     print(f"開始掃描除淨區間: {start_date} -> {end_date}")
     
-    # 2. 從東方財富官方API獲取派息日曆
+    # 1. 獲取派息日曆
     div_records = get_dividend_calendar(start_date, end_date)
-    print(f"東方財富API返回 {len(div_records)} 條派息記錄")
+    print(f"東方財富datacenter返回 {len(div_records)} 條派息記錄")
     
     if not div_records:
         print("該區間內未獲取到分紅記錄。")
@@ -206,46 +230,74 @@ def main():
         return
     
     results = []
+    snap_success = 0
+    snap_fail = 0
+    turnover_success = 0
     
-    # 3. 遍歷每檔股票並進行多維度過濾
-    for item in div_records:
+    # 2. 遍歷每檔股票
+    for idx, item in enumerate(div_records):
         raw_code = str(item.get("SECURITY_CODE", "")).zfill(5)
         name = item.get("SECURITY_NAME_ABBR", "")
         ex_date = item.get("ZS_EX_DIVIDEND_DATE", "")[:10]
         
-        # 直接使用東方財富已換算好的港元派息金額
         dividend_hkd = item.get("DPS_HKD", 0.0)
         if not dividend_hkd or float(dividend_hkd) <= 0:
             continue
         dividend_hkd = float(dividend_hkd)
         
-        # 獲取即時快照數據
-        snap = get_stock_snapshot(raw_code)
+        # 前3隻打印詳細調試信息
+        debug_mode = idx < 3
+        if debug_mode:
+            print(f"\n[DEBUG] 處理第 {idx+1} 隻: {name} ({raw_code})")
+        
+        snap = get_stock_snapshot(raw_code, debug=debug_mode)
         if not snap:
+            snap_fail += 1
+            if debug_mode:
+                print(f"  [DEBUG] 快照獲取失敗")
             continue
+        
+        snap_success += 1
+        
+        # 測試K線接口
+        avg_turnover = get_20d_avg_turnover(raw_code)
+        if avg_turnover > 0:
+            turnover_success += 1
+        if debug_mode:
+            print(f"  [DEBUG] 20日均成交額: {avg_turnover:,.0f} 港元")
             
         market_cap = snap["market_cap"]
         last_price = snap["last_price"]
         lot_size = snap["lot_size"]
         
-        # 條件 1: 市值 > 50 億港元
+        if debug_mode:
+            print(f"  [DEBUG] 股價: {last_price:.3f}, 市值: {market_cap/1e8:.2f}億, 每手: {lot_size}股")
+        
+        # 條件1: 市值 > 50億
         if market_cap < 5_000_000_000:
+            if debug_mode:
+                print(f"  [DEBUG] 市值不足50億，跳過")
             continue
             
         if last_price <= 0 or lot_size <= 0:
+            if debug_mode:
+                print(f"  [DEBUG] 股價或每手股數無效，跳過")
             continue
             
-        # 條件 2: 本次派息收益率 > 3%
+        # 條件2: 本次派息收益率 > 3%
         yield_pct = (dividend_hkd / last_price) * 100.0
         if yield_pct < 3.0:
+            if debug_mode:
+                print(f"  [DEBUG] 收益率不足3%，跳過")
             continue
             
-        # 條件 3: 20 日均成交額 > 3,000 萬港元
-        avg_turnover = get_20d_avg_turnover(raw_code)
+        # 條件3: 20日均成交額 > 3000萬
         if avg_turnover < 30_000_000:
+            if debug_mode:
+                print(f"  [DEBUG] 成交額不足3000萬，跳過")
             continue
         
-        # 計算年度週息率
+        # 年度週息率
         annual_total_div = get_annual_dividend(raw_code)
         annual_yield_pct = (annual_total_div / last_price) * 100.0 if annual_total_div > 0 else 0.0
             
@@ -264,26 +316,19 @@ def main():
             "market_cap_billion": market_cap / 100_000_000.0
         })
     
+    print(f"\n===== 掃描統計 =====")
+    print(f"行情快照成功: {snap_success} 隻，失敗: {snap_fail} 隻")
+    print(f"K線成交額成功: {turnover_success} 隻")
+    print(f"符合所有篩選條件: {len(results)} 隻")
+    
     df = pd.DataFrame(results)
     
     if not df.empty:
-        # 同一隻股票可能有多條派息記錄（中期息+特別息），合併計算
-        df = df.groupby(["code", "name"], as_index=False).agg({
-            "ex_date": "first",
-            "dividend_per_share": "sum",
-            "lot_size": "first",
-            "dividend_per_lot": "sum",
-            "yield_pct": "sum",
-            "annual_yield_pct": "first",
-            "last_price": "first",
-            "market_cap_billion": "first"
-        })
-        # 按本次派息收益率由高到低排序
+        df = df.drop_duplicates(subset=["code"])
         df = df.sort_values(by="yield_pct", ascending=False)
-        print("\n篩選結果:")
-        print(df[["code", "name", "dividend_per_share", "yield_pct", "annual_yield_pct", "dividend_per_lot"]].to_string(index=False))
+        print("\n===== 篩選結果 =====")
+        print(df[["code", "name", "dividend_per_share", "yield_pct", "dividend_per_lot"]].to_string(index=False))
     
-    # 4. 發送至飛書
     push_to_feishu_card(df, start_date, end_date)
 
 if __name__ == "__main__":
