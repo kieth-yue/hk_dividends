@@ -3,45 +3,160 @@ import re
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
 
 FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Referer": "https://gu.qq.com/"
+    "Referer": "https://www.hkexnews.hk/"
 }
 
-def get_dividend_calendar(start_date_str, end_date_str):
-    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
-    page = 1
+def parse_dividend_amount(text, rates=None):
+    """
+    從港交所公告文本中解析每股派息金額（港元）
+    支持格式：「中期股息每股0.5港元」、「每股派人民幣0.1606元」、「每股派0.096美元」
+    """
+    if rates is None:
+        rates = {"HKD": 1.0, "CNY": 1.08, "RMB": 1.08, "USD": 7.82, "港幣": 1.0, "港元": 1.0, "人民幣": 1.08, "美元": 7.82}
+    
+    text = text.replace(" ", "").replace("　", "")
+    
+    patterns = [
+        (r"每股([\d.]+)港元", "HKD"),
+        (r"每股([\d.]+)港幣", "HKD"),
+        (r"每股派([\d.]+)港元", "HKD"),
+        (r"每股派([\d.]+)港幣", "HKD"),
+        (r"股息每股([\d.]+)港元", "HKD"),
+        (r"中期息([\d.]+)港元", "HKD"),
+        (r"末期息([\d.]+)港元", "HKD"),
+        (r"特別股息([\d.]+)港元", "HKD"),
+        (r"每股([\d.]+)人民幣", "CNY"),
+        (r"每股派([\d.]+)人民幣", "CNY"),
+        (r"每股([\d.]+)美元", "USD"),
+        (r"每股派([\d.]+)美元", "USD"),
+        (r"每股([\d.]+)港幣", "HKD"),
+        (r"每股派([\d.]+)港幣", "HKD"),
+        (r"港元([\d.]+)每股", "HKD"),
+        (r"派息每股([\d.]+)", "HKD"),
+        (r"每股派息([\d.]+)港元", "HKD"),
+        (r"每股派息([\d.]+)港幣", "HKD"),
+        (r"每股派息([\d.]+)人民幣", "CNY"),
+        (r"每股派息([\d.]+)美元", "USD"),
+        (r"現金股息每股([\d.]+)港元", "HKD"),
+        (r"現金股息每股([\d.]+)港幣", "HKD"),
+    ]
+    
+    results = []
+    for pattern, currency in patterns:
+        matches = re.findall(pattern, text)
+        for m in matches:
+            try:
+                amount = float(m)
+                if amount > 0:
+                    results.append(amount * rates.get(currency, 1.0))
+            except Exception:
+                continue
+    
+    if results:
+        return sum(results)  # 中期息+特別息會加總
+    return None
+
+def get_dividend_calendar_hkex(start_date_str, end_date_str):
+    """
+    港交所官方披露易：證券持有人享有的權益(股息及其他)
+    URL: https://www3.hkexnews.hk/reports/doe/eent_c.htm
+    """
+    url = "https://www3.hkexnews.hk/reports/doe/eent_c.htm"
     records = []
-    while True:
-        params = {
-            "sortColumns": "ZS_EX_DIVIDEND_DATE",
-            "sortTypes": "1",
-            "pageSize": "100",
-            "pageNumber": str(page),
-            "reportName": "RPT_HK_EXDIVIDEND",
-            "columns": "ALL",
-            "filter": f"(ZS_EX_DIVIDEND_DATE>='{start_date_str}')(ZS_EX_DIVIDEND_DATE<='{end_date_str}')"
-        }
-        try:
-            resp = requests.get(url, params=params, headers=HEADERS, timeout=10).json()
-            if not resp.get("success") or not resp.get("result"):
+    
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.encoding = "utf-8"
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        # 找到主表格
+        tables = soup.find_all("table")
+        target_table = None
+        for t in tables:
+            if "證券簡稱" in t.text and "除淨日" in t.text:
+                target_table = t
                 break
-            data = resp["result"].get("data", [])
-            if not data:
-                break
-            records.extend(data)
-            if page >= resp["result"].get("pages", 1):
-                break
-            page += 1
-        except Exception as e:
-            print(f"獲取分紅數據失敗: {e}")
-            break
+        
+        if not target_table:
+            print("港交所：找不到權益表格")
+            return records
+        
+        rows = target_table.find_all("tr")
+        for row in rows[2:]:  # 跳過表頭兩行
+            cols = row.find_all("td")
+            if len(cols) < 4:
+                continue
+            
+            try:
+                # 第1列：股票名稱(代號)
+                stock_text = cols[1].text.strip()
+                code_match = re.search(r"\((\d{4,5})\)", stock_text)
+                if not code_match:
+                    continue
+                raw_code = code_match.group(1).zfill(5)
+                name = stock_text[:code_match.start()].strip()
+                
+                # 第3列：內容（派息詳情）
+                content = cols[3].text.strip()
+                
+                # 第4列：除淨日
+                ex_date_text = cols[4].text.strip()
+                if not ex_date_text or "/" not in ex_date_text:
+                    continue
+                
+                # 解析日期，格式可能是 DD/MM/YYYY 或 DD/MM
+                ex_date_parts = ex_date_text.split("/")
+                if len(ex_date_parts) == 3:
+                    ex_date = datetime.strptime(ex_date_text, "%d/%m/%Y").strftime("%Y-%m-%d")
+                elif len(ex_date_parts) == 2:
+                    # 只有日/月，補當前年份
+                    day, month = ex_date_parts
+                    year = datetime.now().year
+                    ex_date = f"{year}-{int(month):02d}-{int(day):02d}"
+                else:
+                    continue
+                
+                # 過濾日期區間
+                if ex_date < start_date_str or ex_date > end_date_str:
+                    continue
+                
+                # 解析派息金額
+                div_hkd = parse_dividend_amount(content)
+                if not div_hkd or div_hkd <= 0:
+                    continue
+                
+                # 過濾非現金派息（紅股、供股等）
+                if "紅股" in content and "息" not in content:
+                    continue
+                if "供股" in content:
+                    continue
+                
+                records.append({
+                    "code": raw_code,
+                    "name": name,
+                    "ex_date": ex_date,
+                    "dividend_per_share": div_hkd,
+                    "content": content[:100]
+                })
+            except Exception as e:
+                continue
+                
+    except Exception as e:
+        print(f"港交所數據獲取失敗: {e}")
+    
     return records
 
 def get_stock_snapshot_tencent(sec_code):
+    """
+    騰訊財經公開接口：實時行情
+    field[3]: 最新價, field[44]: 總市值(億港元), field[60]: 每手股數
+    """
     tencent_code = f"hk{sec_code}"
     url = f"https://qt.gtimg.cn/q={tencent_code}"
     try:
@@ -59,7 +174,6 @@ def get_stock_snapshot_tencent(sec_code):
         
         last_price = float(fields[3]) if fields[3] else 0.0
         
-        # field[44]: 總市值（億港元）
         market_cap = 0.0
         if fields[44]:
             try:
@@ -69,7 +183,6 @@ def get_stock_snapshot_tencent(sec_code):
             except Exception:
                 pass
         
-        # 後備：股價×總股本(field[69])
         if market_cap <= 0 and len(fields) > 69 and fields[69]:
             try:
                 total_shares = float(fields[69])
@@ -77,7 +190,6 @@ def get_stock_snapshot_tencent(sec_code):
             except Exception:
                 pass
         
-        # field[60]: 每手股數
         lot_size = 0
         if len(fields) > 60 and fields[60]:
             try:
@@ -93,11 +205,13 @@ def get_stock_snapshot_tencent(sec_code):
             "market_cap": market_cap,
             "lot_size": lot_size
         }
-    except Exception as e:
-        print(f"  騰訊行情請求失敗 {sec_code}: {e}")
+    except Exception:
         return None
 
 def get_20d_avg_turnover_tencent(sec_code):
+    """
+    騰訊財經公開K線接口：20日均成交額
+    """
     tencent_code = f"hk{sec_code}"
     url = f"https://web.ifzq.gtimg.cn/appstock/app/kline/kline?param={tencent_code},day,,,20,"
     try:
@@ -144,7 +258,10 @@ def get_20d_avg_turnover_tencent(sec_code):
     except Exception:
         return 0.0
 
-def get_annual_dividend(sec_code):
+def get_annual_dividend_eastmoney(sec_code):
+    """
+    東方財富datacenter接口：過去12個月總派息（歷史數據齊全）
+    """
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     one_year_ago = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
     today = datetime.now().strftime("%Y-%m-%d")
@@ -202,7 +319,7 @@ def push_to_feishu_card(df, start_date, end_date):
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"掃描區間：`{start_date}` 至 `{end_date}`\n篩選條件：**市值 > 50億** | **20日均額 > 3000萬** | **本次派息收益率 > 3%**\n排序規則：**本次派息收益率由高至低**\n數據源：東方財富 + 騰訊財經"
+                    "content": f"掃描區間：`{start_date}` 至 `{end_date}`\n篩選條件：**市值 > 50億** | **20日均額 > 3000萬** | **本次派息收益率 > 3%**\n排序規則：**本次派息收益率由高至低**\n數據源：港交所披露易 + 騰訊財經"
                 }
             },
             {"tag": "hr"}
@@ -241,10 +358,14 @@ def main():
     
     print(f"開始掃描除淨區間: {start_date} -> {end_date}")
     
-    div_records = get_dividend_calendar(start_date, end_date)
-    print(f"東方財富返回 {len(div_records)} 條派息記錄")
+    # 1. 港交所官方：分紅日曆
+    div_records = get_dividend_calendar_hkex(start_date, end_date)
+    print(f"港交所披露易返回 {len(div_records)} 條現金派息記錄")
+    for r in div_records:
+        print(f"  {r['name']} ({r['code']}) | 除淨:{r['ex_date']} | 每股:HK${r['dividend_per_share']:.4f}")
     
     if not div_records:
+        print("該區間內未獲取到分紅記錄。")
         push_to_feishu_card(pd.DataFrame(), start_date, end_date)
         return
     
@@ -257,17 +378,11 @@ def main():
     filtered_turnover = 0
     filtered_lot = 0
     
-    print("\n===== 通過市值過濾的股票明細 =====")
-    
-    for idx, item in enumerate(div_records):
-        raw_code = str(item.get("SECURITY_CODE", "")).zfill(5)
-        name = item.get("SECURITY_NAME_ABBR", "")
-        ex_date = item.get("ZS_EX_DIVIDEND_DATE", "")[:10]
-        
-        dividend_hkd = item.get("DPS_HKD", 0.0)
-        if not dividend_hkd or float(dividend_hkd) <= 0:
-            continue
-        dividend_hkd = float(dividend_hkd)
+    for item in div_records:
+        raw_code = item["code"]
+        name = item["name"]
+        ex_date = item["ex_date"]
+        dividend_hkd = item["dividend_per_share"]
         
         snap = get_stock_snapshot_tencent(raw_code)
         if not snap:
@@ -296,10 +411,6 @@ def main():
             continue
             
         yield_pct = (dividend_hkd / last_price) * 100.0
-        
-        # 打印所有通過市值過濾的股票
-        print(f"  {name} ({raw_code}) | 股價:{last_price:.3f} | 市值:{market_cap/1e8:.1f}億 | 每股派息:{dividend_hkd:.4f} | 本次收益率:{yield_pct:.2f}% | 20日均額:{avg_turnover/1e4:.0f}萬 | 每手:{lot_size}")
-        
         if yield_pct < 3.0:
             filtered_yield += 1
             continue
@@ -308,7 +419,8 @@ def main():
             filtered_turnover += 1
             continue
         
-        annual_total_div = get_annual_dividend(raw_code)
+        # 年度週息率（東方財富歷史數據）
+        annual_total_div = get_annual_dividend_eastmoney(raw_code)
         annual_yield_pct = (annual_total_div / last_price) * 100.0 if annual_total_div > 0 else 0.0
             
         dividend_per_lot = dividend_hkd * lot_size
