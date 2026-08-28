@@ -19,7 +19,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests pandas
+          pip install requests pandas beautifulsoup4
 
       - name: Run Dividend Scanner
         env:
