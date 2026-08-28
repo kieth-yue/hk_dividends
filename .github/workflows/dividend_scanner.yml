@@ -1,4 +1,4 @@
-name: HK Stock Dividend Scanner (EastMoney)
+name: HK Stock Dividend Scanner
 on:
   schedule:
     # 每天香港時間 08:30 自動執行 (UTC 00:30)
