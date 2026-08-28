@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
@@ -7,9 +8,9 @@ from bs4 import BeautifulSoup
 
 FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK")
 
+# 全局 Header 不帶 Referer，避免跨站爬蟲特徵觸發 WAF
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Referer": "https://www.hkexnews.hk/"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
 RATES = {"HKD": 1.0, "CNY": 1.08, "RMB": 1.08, "USD": 7.82,
@@ -20,9 +21,49 @@ EXCLUDE_KEYWORDS = ["兌", "債", "ETF", "Ｒ", "－Ｒ", "-R", "－Ｕ", "-U",
                     "ＧＸ", "GX", "安碩", "領航", "貝萊德", "iShares",
                     "未來資產", "三星", "法興", "瑞通"]
 
+# 全局防護常數
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 2
+REQUEST_INTERVAL = 0.3
+EM_MAX_PAGES = 5
+MAX_RUNTIME_SECONDS = 7 * 60
+
 def get_hkt_now():
-    """強制獲取香港時間 (UTC+8)，無論腳本在哪個時區運行"""
     return datetime.utcnow() + timedelta(hours=8)
+
+def http_get_with_retry(url, headers=None, params=None, timeout=10, encoding=None):
+    last_exception = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            resp = requests.get(url, headers=headers or HEADERS, params=params, timeout=timeout)
+            if encoding:
+                resp.encoding = encoding
+            return resp
+        except Exception as e:
+            last_exception = e
+            if attempt < MAX_RETRIES:
+                wait_sec = RETRY_BACKOFF_BASE ** attempt
+                print(f"  [重試] 請求失敗({type(e).__name__})，{wait_sec}秒後重試 ({attempt+1}/{MAX_RETRIES})")
+                time.sleep(wait_sec)
+            else:
+                print(f"  [放棄] 重試{MAX_RETRIES}次後仍失敗: {type(e).__name__}")
+    raise last_exception if last_exception else Exception("Unknown request error")
+
+def http_post_with_retry(url, json_data, headers=None, timeout=10):
+    last_exception = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            resp = requests.post(url, json=json_data, headers=headers or {"Content-Type": "application/json"}, timeout=timeout)
+            return resp
+        except Exception as e:
+            last_exception = e
+            if attempt < MAX_RETRIES:
+                wait_sec = RETRY_BACKOFF_BASE ** attempt
+                print(f"  [重試] POST失敗({type(e).__name__})，{wait_sec}秒後重試 ({attempt+1}/{MAX_RETRIES})")
+                time.sleep(wait_sec)
+            else:
+                print(f"  [放棄] POST重試{MAX_RETRIES}次後仍失敗: {type(e).__name__}")
+    raise last_exception if last_exception else Exception("Unknown request error")
 
 def normalize_name(name):
     name = name.replace("　", " ").strip()
@@ -165,8 +206,11 @@ def parse_dividend_amount(text):
 def get_dividend_calendar_hkex(start_date_str, end_date_str):
     url = "https://www3.hkexnews.hk/reports/doe/eent_c.htm"
     records = []
+    # 僅港交所請求帶上專屬 Referer
+    hkex_headers = HEADERS.copy()
+    hkex_headers["Referer"] = "https://www.hkexnews.hk/"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp = http_get_with_retry(url, headers=hkex_headers, timeout=15)
         resp.encoding = "utf-8"
         soup = BeautifulSoup(resp.text, "html.parser")
         tables = soup.find_all("table")
@@ -234,8 +278,7 @@ def get_stock_snapshot_tencent(sec_code):
     tencent_code = f"hk{sec_code}"
     url = f"https://qt.gtimg.cn/q={tencent_code}"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        resp.encoding = "gbk"
+        resp = http_get_with_retry(url, timeout=10, encoding="gbk")
         text = resp.text.strip()
         match = re.search(r'="([^"]+)"', text)
         if not match:
@@ -278,8 +321,9 @@ def get_20d_avg_turnover_tencent(sec_code):
     tencent_code = f"hk{sec_code}"
     url = f"https://web.ifzq.gtimg.cn/appstock/app/kline/kline?param={tencent_code},day,,,20,"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10).json()
-        stock_data = resp.get("data", {}).get(tencent_code, {})
+        resp = http_get_with_retry(url, timeout=10)
+        resp_json = resp.json()
+        stock_data = resp_json.get("data", {}).get(tencent_code, {})
         klines = None
         for key in ["day", "hkday", "qfqday", "kline"]:
             if key in stock_data and stock_data[key]:
@@ -287,8 +331,8 @@ def get_20d_avg_turnover_tencent(sec_code):
                 break
         if not klines:
             url2 = f"https://ifzq.gtimg.cn/appstock/app/hkfqkline/get?param={tencent_code},day,,,20,"
-            resp2 = requests.get(url2, headers=HEADERS, timeout=10).json()
-            stock_data2 = resp2.get("data", {}).get(tencent_code, {})
+            resp2 = http_get_with_retry(url2, timeout=10)
+            stock_data2 = resp2.json().get("data", {}).get(tencent_code, {})
             for key in ["day", "hkday", "qfqday"]:
                 if key in stock_data2 and stock_data2[key]:
                     klines = stock_data2[key]
@@ -319,10 +363,11 @@ def get_20d_avg_turnover_tencent(sec_code):
 def get_annual_dividend_eastmoney(sec_code):
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     one_year_ago = (get_hkt_now() - timedelta(days=365)).strftime("%Y-%m-%d")
-    today = get_hkt_now().strftime("%Y-%m-%d")
+    # 修復：上限放寬至未來30天，確保涵蓋本次即將除淨嘅派息
+    future_date = (get_hkt_now() + timedelta(days=30)).strftime("%Y-%m-%d")
     total_div = 0.0
     page = 1
-    while True:
+    while page <= EM_MAX_PAGES:
         params = {
             "sortColumns": "ZS_EX_DIVIDEND_DATE",
             "sortTypes": "-1",
@@ -330,20 +375,22 @@ def get_annual_dividend_eastmoney(sec_code):
             "pageNumber": str(page),
             "reportName": "RPT_HK_EXDIVIDEND",
             "columns": "SECURITY_CODE,DPS_HKD,ZS_EX_DIVIDEND_DATE",
-            "filter": f"(SECURITY_CODE=\"{sec_code}\")(ZS_EX_DIVIDEND_DATE>='{one_year_ago}')(ZS_EX_DIVIDEND_DATE<='{today}')"
+            "filter": f"(SECURITY_CODE=\"{sec_code}\")(ZS_EX_DIVIDEND_DATE>='{one_year_ago}')(ZS_EX_DIVIDEND_DATE<='{future_date}')"
         }
         try:
-            resp = requests.get(url, params=params, headers=HEADERS, timeout=10).json()
-            if not resp.get("success") or not resp.get("result"):
+            resp = http_get_with_retry(url, params=params, timeout=10)
+            resp_json = resp.json()
+            if not resp_json.get("success") or not resp_json.get("result"):
                 break
-            data = resp["result"].get("data", [])
+            data = resp_json["result"].get("data", [])
             if not data:
                 break
             for item in data:
                 dps = item.get("DPS_HKD", 0)
                 if dps and float(dps) > 0:
                     total_div += float(dps)
-            if page >= resp["result"].get("pages", 1):
+            total_pages = resp_json["result"].get("pages", 1)
+            if page >= total_pages:
                 break
             page += 1
         except Exception:
@@ -401,13 +448,44 @@ def push_to_feishu_card(df, start_date, end_date, generate_dt):
         }
     payload = {"msg_type": "interactive", "card": card}
     try:
-        resp = requests.post(FEISHU_WEBHOOK, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
+        resp = http_post_with_retry(FEISHU_WEBHOOK, json_data=payload, timeout=10)
         print("飛書推播回執:", resp.text)
     except Exception as e:
         print(f"飛書推送失敗: {e}")
 
+def push_error_card(start_date, end_date, generate_dt, error_msg):
+    if not FEISHU_WEBHOOK:
+        print("未設定 FEISHU_WEBHOOK，略過推送。")
+        return
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "⚠️ 港股派息掃描異常"},
+            "template": "red"
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"生成時間：`{generate_dt}`\n"
+                        f"掃描區間：`{start_date}` ~ `{end_date}`\n\n"
+                        f"**{error_msg}**\n"
+                        f"建議：手動檢查 https://www3.hkexnews.hk/reports/doe/eent_c.htm"
+                    )
+                }
+            }
+        ]
+    }
+    payload = {"msg_type": "interactive", "card": card}
+    try:
+        resp = http_post_with_retry(FEISHU_WEBHOOK, json_data=payload, timeout=10)
+        print("飛書錯誤通知回執:", resp.text)
+    except Exception as e:
+        print(f"飛書推送失敗: {e}")
+
 def get_trading_day_range(days=7):
-    """計算未來N個交易日（跳過星期六、日），使用香港時間"""
     today = get_hkt_now().date()
     current = today
     collect = []
@@ -421,13 +499,16 @@ def get_trading_day_range(days=7):
     return start, end, today
 
 def main():
+    script_start_time = time.time()
     start_date, end_date, today_date = get_trading_day_range(7)
     generate_datetime = get_hkt_now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"開始掃描除淨區間(跳週六日, HKT): {start_date} -> {end_date}")
+    print(f"全局超時限制: {MAX_RUNTIME_SECONDS}秒（{MAX_RUNTIME_SECONDS // 60}分鐘）")
 
     div_records = get_dividend_calendar_hkex(start_date, end_date)
     print(f"港交所披露易返回 {len(div_records)} 條現金派息記錄")
 
+    # 修復：空列表代表該區間真的冇派息記錄，推送正常藍色卡片
     if not div_records:
         print("該區間內未獲取到分紅記錄。")
         push_to_feishu_card(pd.DataFrame(), start_date, end_date, generate_datetime)
@@ -442,12 +523,23 @@ def main():
     filtered_turnover = 0
     filtered_lot = 0
     filtered_annual = 0
+    filtered_ex_today = 0
+    timeout_triggered = False
 
-    for item in div_records:
+    for idx, item in enumerate(div_records):
+        elapsed = time.time() - script_start_time
+        if elapsed > MAX_RUNTIME_SECONDS:
+            print(f"\n[超時] 已運行 {elapsed:.0f} 秒，超過 {MAX_RUNTIME_SECONDS} 秒限制，強制結束掃描。")
+            timeout_triggered = True
+            break
+
         raw_code = item["code"]
         name = item["name"]
         ex_date_str = item["ex_date"]
         dividend_hkd = item["dividend_per_share"]
+
+        if idx > 0:
+            time.sleep(REQUEST_INTERVAL)
 
         snap = get_stock_snapshot_tencent(raw_code)
         if not snap:
@@ -487,11 +579,15 @@ def main():
             filtered_annual += 1
             continue
 
-        dividend_per_lot = dividend_hkd * lot_size
-        lot_cost = last_price * lot_size
-
         ex_date_obj = datetime.strptime(ex_date_str, "%Y-%m-%d").date()
         days_to_ex = (ex_date_obj - today_date).days
+
+        if days_to_ex < 1:
+            filtered_ex_today += 1
+            continue
+
+        dividend_per_lot = dividend_hkd * lot_size
+        lot_cost = last_price * lot_size
 
         results.append({
             "name": name,
@@ -508,7 +604,8 @@ def main():
             "days_to_ex": days_to_ex
         })
 
-    print(f"\n===== 掃描統計 =====")
+    total_elapsed = time.time() - script_start_time
+    print(f"\n===== 掃描統計（耗時 {total_elapsed:.1f} 秒）=====")
     print(f"行情快照成功: {snap_success} 隻，失敗: {snap_fail} 隻")
     print(f"K線成交額成功: {turnover_success} 隻")
     print(f"市值過濾淘汰: {filtered_cap} 隻")
@@ -516,7 +613,11 @@ def main():
     print(f"單次收益率<1%淘汰: {filtered_yield} 隻")
     print(f"成交額<1000萬淘汰: {filtered_turnover} 隻")
     print(f"年度週息率<5%淘汰: {filtered_annual} 隻")
+    print(f"今日已除淨跳過: {filtered_ex_today} 隻")
     print(f"符合所有篩選條件: {len(results)} 隻")
+
+    if timeout_triggered:
+        print("因超時提前結束，推送已掃描到嘅部分結果。")
 
     df = pd.DataFrame(results)
     if not df.empty:
@@ -525,7 +626,12 @@ def main():
         print("\n===== 最終篩選結果 =====")
         print(df[["code", "name", "dividend_per_share", "yield_pct", "annual_yield_pct", "dividend_per_lot", "ex_date", "days_to_ex"]].to_string(index=False))
 
-    push_to_feishu_card(df, start_date, end_date, generate_datetime)
+    if timeout_triggered:
+        push_to_feishu_card(df, start_date, end_date, generate_datetime)
+        push_error_card(start_date, end_date, generate_datetime,
+                        f"掃描運行超過 {MAX_RUNTIME_SECONDS // 60} 分鐘，已強制終止。\n上方結果僅包含已掃描到嘅部分股票，可能不完整。")
+    else:
+        push_to_feishu_card(df, start_date, end_date, generate_datetime)
 
 if __name__ == "__main__":
     main()
