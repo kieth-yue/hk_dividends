@@ -15,11 +15,14 @@ HEADERS = {
 RATES = {"HKD": 1.0, "CNY": 1.08, "RMB": 1.08, "USD": 7.82,
          "港幣": 1.0, "港元": 1.0, "人民幣": 1.08, "美元": 7.82}
 
-# ETF/衍生品關鍵詞（已移除會誤殺正股嘅發行商名稱：國泰/恒生/中銀/滙豐/渣打/海通/工銀/建銀/農銀）
 EXCLUDE_KEYWORDS = ["兌", "債", "ETF", "Ｒ", "－Ｒ", "-R", "－Ｕ", "-U",
                     "牛", "熊", "窩輪", "認股證", "界內證", "槓桿", "反向",
                     "ＧＸ", "GX", "安碩", "領航", "貝萊德", "iShares",
                     "未來資產", "三星", "法興", "瑞通"]
+
+def get_hkt_now():
+    """強制獲取香港時間 (UTC+8)，無論腳本在哪個時區運行"""
+    return datetime.utcnow() + timedelta(hours=8)
 
 def normalize_name(name):
     name = name.replace("　", " ").strip()
@@ -35,7 +38,6 @@ def normalize_name(name):
     return result.strip()
 
 def is_excluded_stock(code, name):
-    # 8開頭為人民幣櫃台，9開頭為美元櫃台，0開頭為標準正股（含09xxx）
     if code.startswith("8") or code.startswith("9"):
         return True
     for kw in EXCLUDE_KEYWORDS:
@@ -44,50 +46,50 @@ def is_excluded_stock(code, name):
     return False
 
 def parse_dividend_amount(text):
-    """
-    從港交所公告文本中解析每股派息金額（港元）
-    支援：港仙（自動/100）、港元/港幣、美元、人民幣
-    規則：
-    1. 按匹配位置去重，避免同一金額被多個pattern重複匹配
-    2. 如果搵到港元/港幣/港仙金額，就唔再計外幣（避免港元+美元等值重複）
-    3. 只有冇港元金額時，先至用美元/人民幣換算
-    """
     text = text.replace(" ", "").replace("　", "")
 
     hkd_patterns = [
-        # 港仙
         (r"中期股息([\d.]+)港仙", 0.01, True),
         (r"中期息([\d.]+)港仙", 0.01, True),
         (r"末期股息([\d.]+)港仙", 0.01, True),
         (r"末期息([\d.]+)港仙", 0.01, True),
         (r"特別股息([\d.]+)港仙", 0.01, True),
         (r"特別息([\d.]+)港仙", 0.01, True),
+        (r"特別分派([\d.]+)港仙", 0.01, True),
+        (r"資本回饋([\d.]+)港仙", 0.01, True),
+        (r"一次性股息([\d.]+)港仙", 0.01, True),
         (r"現金股息每股([\d.]+)港仙", 0.01, True),
         (r"每股派息([\d.]+)港仙", 0.01, True),
         (r"每股派([\d.]+)港仙", 0.01, True),
         (r"股息每股([\d.]+)港仙", 0.01, True),
         (r"派息每股([\d.]+)港仙", 0.01, True),
         (r"每股([\d.]+)港仙", 0.01, True),
-        # 港元
+
         (r"中期股息([\d.]+)港元", 1.0, False),
         (r"中期息([\d.]+)港元", 1.0, False),
         (r"末期股息([\d.]+)港元", 1.0, False),
         (r"末期息([\d.]+)港元", 1.0, False),
         (r"特別股息([\d.]+)港元", 1.0, False),
         (r"特別息([\d.]+)港元", 1.0, False),
+        (r"特別分派([\d.]+)港元", 1.0, False),
+        (r"資本回饋([\d.]+)港元", 1.0, False),
+        (r"一次性股息([\d.]+)港元", 1.0, False),
         (r"現金股息每股([\d.]+)港元", 1.0, False),
         (r"每股派息([\d.]+)港元", 1.0, False),
         (r"每股派([\d.]+)港元", 1.0, False),
         (r"股息每股([\d.]+)港元", 1.0, False),
         (r"派息每股([\d.]+)港元", 1.0, False),
         (r"每股([\d.]+)港元", 1.0, False),
-        # 港幣
+
         (r"中期股息([\d.]+)港幣", 1.0, False),
         (r"中期息([\d.]+)港幣", 1.0, False),
         (r"末期股息([\d.]+)港幣", 1.0, False),
         (r"末期息([\d.]+)港幣", 1.0, False),
         (r"特別股息([\d.]+)港幣", 1.0, False),
         (r"特別息([\d.]+)港幣", 1.0, False),
+        (r"特別分派([\d.]+)港幣", 1.0, False),
+        (r"資本回饋([\d.]+)港幣", 1.0, False),
+        (r"一次性股息([\d.]+)港幣", 1.0, False),
         (r"現金股息每股([\d.]+)港幣", 1.0, False),
         (r"每股派息([\d.]+)港幣", 1.0, False),
         (r"每股派([\d.]+)港幣", 1.0, False),
@@ -97,26 +99,27 @@ def parse_dividend_amount(text):
     ]
 
     fx_patterns = [
-        # 美元
         (r"中期股息([\d.]+)美元", RATES["USD"], False),
         (r"中期息([\d.]+)美元", RATES["USD"], False),
         (r"末期股息([\d.]+)美元", RATES["USD"], False),
         (r"末期息([\d.]+)美元", RATES["USD"], False),
         (r"特別股息([\d.]+)美元", RATES["USD"], False),
         (r"特別息([\d.]+)美元", RATES["USD"], False),
+        (r"特別分派([\d.]+)美元", RATES["USD"], False),
         (r"現金股息每股([\d.]+)美元", RATES["USD"], False),
         (r"每股派息([\d.]+)美元", RATES["USD"], False),
         (r"每股派([\d.]+)美元", RATES["USD"], False),
         (r"股息每股([\d.]+)美元", RATES["USD"], False),
         (r"派息每股([\d.]+)美元", RATES["USD"], False),
         (r"每股([\d.]+)美元", RATES["USD"], False),
-        # 人民幣
+
         (r"中期股息([\d.]+)人民幣", RATES["CNY"], False),
         (r"中期息([\d.]+)人民幣", RATES["CNY"], False),
         (r"末期股息([\d.]+)人民幣", RATES["CNY"], False),
         (r"末期息([\d.]+)人民幣", RATES["CNY"], False),
         (r"特別股息([\d.]+)人民幣", RATES["CNY"], False),
         (r"特別息([\d.]+)人民幣", RATES["CNY"], False),
+        (r"特別分派([\d.]+)人民幣", RATES["CNY"], False),
         (r"現金股息每股([\d.]+)人民幣", RATES["CNY"], False),
         (r"每股派息([\d.]+)人民幣", RATES["CNY"], False),
         (r"每股派([\d.]+)人民幣", RATES["CNY"], False),
@@ -205,7 +208,7 @@ def get_dividend_calendar_hkex(start_date_str, end_date_str):
                     ex_date = datetime.strptime(ex_date_text, "%d/%m/%Y").strftime("%Y-%m-%d")
                 elif len(ex_date_parts) == 2:
                     day, month = ex_date_parts
-                    year = datetime.now().year
+                    year = get_hkt_now().year
                     ex_date = f"{year}-{int(month):02d}-{int(day):02d}"
                 if not ex_date:
                     continue
@@ -315,8 +318,8 @@ def get_20d_avg_turnover_tencent(sec_code):
 
 def get_annual_dividend_eastmoney(sec_code):
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
-    one_year_ago = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
-    today = datetime.now().strftime("%Y-%m-%d")
+    one_year_ago = (get_hkt_now() - timedelta(days=365)).strftime("%Y-%m-%d")
+    today = get_hkt_now().strftime("%Y-%m-%d")
     total_div = 0.0
     page = 1
     while True:
@@ -371,7 +374,7 @@ def push_to_feishu_card(df, start_date, end_date, generate_dt):
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"生成時間：`{generate_dt}`\n掃描區間：`{start_date}` ~ `{end_date}`\n篩選：市值>50億｜20日均額>3000萬｜派息收益率>3%\n數據源：港交所披露易 + 騰訊財經"
+                    "content": f"生成時間：`{generate_dt}`\n掃描區間：`{start_date}` ~ `{end_date}`\n篩選：市值>50億｜20日均額>1000萬｜年度週息率>5%\n數據源：港交所披露易 + 騰訊財經 + 東方財富"
                 }
             },
             {"tag": "hr"}
@@ -380,9 +383,9 @@ def push_to_feishu_card(df, start_date, end_date, generate_dt):
             days_diff = row["days_to_ex"]
             item_md = (
                 f"**{row['name']} ({row['code']})**\n"
+                f"📈 年度週息率：<font color='green'>**{row['annual_yield_pct']:.2f}%**</font>｜本次收益率：{row['yield_pct']:.2f}%\n"
                 f"💵 每手派息：HK$ {row['dividend_per_lot']:,.0f}\n"
                 f"💸 每手入場：HK$ {row['lot_cost']:,.0f}（{row['lot_size']:,}股 × ${row['last_price']:.2f}）\n"
-                f"📈 收益率：<font color='green'>{row['yield_pct']:.2f}%</font>｜年度週息：{row['annual_yield_pct']:.2f}%\n"
                 f"📊 每股派息：HK$ {row['dividend_per_share']:.4f}｜市值：{row['market_cap_billion']:.0f}億\n"
                 f"📅 除淨日：{row['ex_date']}｜距除淨：{days_diff}日"
             )
@@ -404,13 +407,13 @@ def push_to_feishu_card(df, start_date, end_date, generate_dt):
         print(f"飛書推送失敗: {e}")
 
 def get_trading_day_range(days=7):
-    """計算未來N個交易日（跳過星期六、日）"""
-    today = datetime.now().date()
+    """計算未來N個交易日（跳過星期六、日），使用香港時間"""
+    today = get_hkt_now().date()
     current = today
     collect = []
     while len(collect) < days:
         wd = current.weekday()
-        if wd < 5:  # 0=週一 ... 4=週五
+        if wd < 5:
             collect.append(current)
         current = current + timedelta(days=1)
     start = collect[0].strftime("%Y-%m-%d")
@@ -419,8 +422,8 @@ def get_trading_day_range(days=7):
 
 def main():
     start_date, end_date, today_date = get_trading_day_range(7)
-    generate_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"開始掃描除淨區間(跳週六日): {start_date} -> {end_date}")
+    generate_datetime = get_hkt_now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"開始掃描除淨區間(跳週六日, HKT): {start_date} -> {end_date}")
 
     div_records = get_dividend_calendar_hkex(start_date, end_date)
     print(f"港交所披露易返回 {len(div_records)} 條現金派息記錄")
@@ -438,6 +441,7 @@ def main():
     filtered_yield = 0
     filtered_turnover = 0
     filtered_lot = 0
+    filtered_annual = 0
 
     for item in div_records:
         raw_code = item["code"]
@@ -469,15 +473,20 @@ def main():
             continue
 
         yield_pct = (dividend_hkd / last_price) * 100.0
-        if yield_pct < 3.0:
+        if yield_pct < 1.0:
             filtered_yield += 1
             continue
-        if avg_turnover > 0 and avg_turnover < 30_000_000:
+
+        if avg_turnover > 0 and avg_turnover < 10_000_000:
             filtered_turnover += 1
             continue
 
         annual_total_div = get_annual_dividend_eastmoney(raw_code)
         annual_yield_pct = (annual_total_div / last_price) * 100.0 if annual_total_div > 0 else 0.0
+        if annual_yield_pct < 5.0:
+            filtered_annual += 1
+            continue
+
         dividend_per_lot = dividend_hkd * lot_size
         lot_cost = last_price * lot_size
 
@@ -504,16 +513,17 @@ def main():
     print(f"K線成交額成功: {turnover_success} 隻")
     print(f"市值過濾淘汰: {filtered_cap} 隻")
     print(f"每手股數缺失: {filtered_lot} 隻")
-    print(f"收益率過濾淘汰: {filtered_yield} 隻")
-    print(f"成交額過濾淘汰: {filtered_turnover} 隻")
+    print(f"單次收益率<1%淘汰: {filtered_yield} 隻")
+    print(f"成交額<1000萬淘汰: {filtered_turnover} 隻")
+    print(f"年度週息率<5%淘汰: {filtered_annual} 隻")
     print(f"符合所有篩選條件: {len(results)} 隻")
 
     df = pd.DataFrame(results)
     if not df.empty:
         df = df.drop_duplicates(subset=["code"])
-        df = df.sort_values(by="yield_pct", ascending=False)
+        df = df.sort_values(by="annual_yield_pct", ascending=False)
         print("\n===== 最終篩選結果 =====")
-        print(df[["code", "name", "dividend_per_share", "yield_pct", "dividend_per_lot", "lot_cost", "ex_date", "days_to_ex"]].to_string(index=False))
+        print(df[["code", "name", "dividend_per_share", "yield_pct", "annual_yield_pct", "dividend_per_lot", "ex_date", "days_to_ex"]].to_string(index=False))
 
     push_to_feishu_card(df, start_date, end_date, generate_datetime)
 
