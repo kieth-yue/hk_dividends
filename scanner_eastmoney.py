@@ -13,7 +13,7 @@ HEADERS = {
 
 def get_dividend_calendar(start_date_str, end_date_str):
     """
-    東方財富datacenter接口：分紅日曆（已確認海外可訪問）
+    東方財富datacenter接口：分紅日曆
     """
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     page = 1
@@ -49,7 +49,6 @@ def get_dividend_calendar(start_date_str, end_date_str):
 def get_stock_snapshot_tencent(sec_code):
     """
     騰訊財經公開接口：實時行情
-    返回：最新價、總市值（港元）、每手股數
     """
     tencent_code = f"hk{sec_code}"
     url = f"https://qt.gtimg.cn/q={tencent_code}"
@@ -58,7 +57,6 @@ def get_stock_snapshot_tencent(sec_code):
         resp.encoding = "gbk"
         text = resp.text.strip()
         
-        # 解析騰訊行情格式：v_hk00700="00700~騰訊控股~00700~價格~昨收~..."
         match = re.search(r'="([^"]+)"', text)
         if not match:
             return None
@@ -67,17 +65,12 @@ def get_stock_snapshot_tencent(sec_code):
         if len(fields) < 50:
             return None
         
-        # 字段位置（騰訊港股行情）：
-        # fields[3]: 當前價
-        # fields[4]: 昨收
-        # fields[45]: 總市值（億港元）
-        # fields[48]: 每手股數
         last_price = float(fields[3]) if fields[3] else 0.0
         
         market_cap = 0.0
         if len(fields) > 45 and fields[45]:
             try:
-                market_cap = float(fields[45]) * 100_000_000  # 億轉港元
+                market_cap = float(fields[45]) * 100_000_000
             except Exception:
                 pass
         
@@ -105,35 +98,57 @@ def get_20d_avg_turnover_tencent(sec_code):
     騰訊財經公開K線接口：20日均成交額（港元）
     """
     tencent_code = f"hk{sec_code}"
-    url = f"https://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get?param={tencent_code},day,,,20,qfq"
+    # 唔帶qfq，直接拿原始日K線
+    url = f"https://web.ifzq.gtimg.cn/appstock/app/kline/kline?param={tencent_code},day,,,20,"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10).json()
-        data = resp.get("data", {}).get(tencent_code, {})
+        stock_data = resp.get("data", {}).get(tencent_code, {})
         
-        # 騰訊K線數據在 day 或 hkday 字段
-        klines = data.get("day") or data.get("hkday") or []
+        # 依次嘗試多個可能的字段名
+        klines = None
+        for key in ["day", "hkday", "qfqday", "kline"]:
+            if key in stock_data and stock_data[key]:
+                klines = stock_data[key]
+                break
+        
+        if not klines:
+            # 試下備用域名
+            url2 = f"https://ifzq.gtimg.cn/appstock/app/hkfqkline/get?param={tencent_code},day,,,20,"
+            resp2 = requests.get(url2, headers=HEADERS, timeout=10).json()
+            stock_data2 = resp2.get("data", {}).get(tencent_code, {})
+            for key in ["day", "hkday", "qfqday"]:
+                if key in stock_data2 and stock_data2[key]:
+                    klines = stock_data2[key]
+                    break
+        
         if not klines or len(klines) < 5:
             return 0.0
         
-        # 每條K線格式：[日期, 開盤, 收盤, 最高, 最低, 成交量, ...]
-        # 成交額需要單獨計算：成交量 × 收盤價（近似）
-        # 或者直接用接口返回的成交額字段
         turnovers = []
         for k in klines[-20:]:
-            if len(k) >= 7:
-                # 第6個字段是成交量（股），乘以收盤價得到成交額
-                volume = float(k[5]) if k[5] else 0
-                close = float(k[2]) if k[2] else 0
-                turnovers.append(volume * close)
-            elif len(k) >= 6:
-                volume = float(k[5]) if k[5] else 0
-                close = float(k[2]) if k[2] else 0
-                turnovers.append(volume * close)
+            try:
+                if len(k) >= 6:
+                    # 騰訊日K線格式：[日期, 開盤, 收盤, 最高, 最低, 成交量, 成交額, ...]
+                    volume = float(k[5]) if k[5] else 0
+                    close = float(k[2]) if k[2] else 0
+                    
+                    # 如果有第7個字段成交額，直接用
+                    if len(k) >= 7 and k[6]:
+                        turnover = float(k[6])
+                        if turnover > 10000:  # 成交額正常應該大於1萬
+                            turnovers.append(turnover)
+                            continue
+                    
+                    # 否則用成交量×收盤價近似
+                    if volume > 0 and close > 0:
+                        turnovers.append(volume * close)
+            except Exception:
+                continue
         
         if not turnovers:
             return 0.0
         return sum(turnovers) / len(turnovers)
-    except Exception as e:
+    except Exception:
         return 0.0
 
 def get_annual_dividend(sec_code):
@@ -294,8 +309,8 @@ def main():
         if yield_pct < 3.0:
             continue
             
-        # 條件3: 20日均成交額 > 3000萬港元
-        if avg_turnover < 30_000_000:
+        # 條件3: 20日均成交額 > 3000萬港元（如果攞唔到成交額就暫時放行，避免漏網）
+        if avg_turnover > 0 and avg_turnover < 30_000_000:
             continue
         
         # 年度週息率
