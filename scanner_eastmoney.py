@@ -41,7 +41,15 @@ def get_dividend_calendar(start_date_str, end_date_str):
             break
     return records
 
-def get_stock_snapshot_tencent(sec_code, debug=False):
+def get_stock_snapshot_tencent(sec_code):
+    """
+    騰訊財經公開接口：實時行情
+    字段位置（已確認）：
+    field[3]: 最新價
+    field[44]: 總市值（億港元）
+    field[60]: 每手股數
+    field[69]: 總股本
+    """
     tencent_code = f"hk{sec_code}"
     url = f"https://qt.gtimg.cn/q={tencent_code}"
     try:
@@ -54,47 +62,37 @@ def get_stock_snapshot_tencent(sec_code, debug=False):
             return None
         
         fields = match.group(1).split("~")
-        
-        if debug:
-            print(f"  [DEBUG] 總字段數: {len(fields)}")
-            for i, f in enumerate(fields):
-                if f and len(f) < 30:
-                    print(f"    field[{i}] = {f}")
-        
-        if len(fields) < 10:
+        if len(fields) < 70:
             return None
         
         # field[3]: 最新價
         last_price = float(fields[3]) if fields[3] else 0.0
         
-        # 嘗試多個可能嘅市值字段位置
+        # field[44]: 總市值（億港元）
         market_cap = 0.0
-        # 騰訊港股總市值通常在 field[44] 或 field[45]，單位：億港元
-        for cap_idx in [44, 45, 46, 47]:
-            if len(fields) > cap_idx and fields[cap_idx]:
-                try:
-                    cap_val = float(fields[cap_idx])
-                    if cap_val > 10:  # 市值億，正常大於10
-                        market_cap = cap_val * 100_000_000
-                        if debug:
-                            print(f"  [DEBUG] 使用 field[{cap_idx}] 作為市值: {cap_val}億")
-                        break
-                except Exception:
-                    continue
+        if fields[44]:
+            try:
+                cap_val = float(fields[44])
+                if cap_val > 0:
+                    market_cap = cap_val * 100_000_000
+            except Exception:
+                pass
         
-        # 每手股數，嘗試多個位置
+        # 如果市值為0，用 股價×總股本(field[69]) 計算
+        if market_cap <= 0 and len(fields) > 69 and fields[69]:
+            try:
+                total_shares = float(fields[69])
+                market_cap = last_price * total_shares
+            except Exception:
+                pass
+        
+        # field[60]: 每手股數
         lot_size = 0
-        for lot_idx in [48, 49, 50, 51]:
-            if len(fields) > lot_idx and fields[lot_idx]:
-                try:
-                    lot_val = int(fields[lot_idx])
-                    if lot_val in [100, 200, 500, 1000, 2000, 2500, 3000, 4000, 5000, 6000, 8000, 10000]:
-                        lot_size = lot_val
-                        if debug:
-                            print(f"  [DEBUG] 使用 field[{lot_idx}] 作為每手股數: {lot_val}")
-                        break
-                except Exception:
-                    continue
+        if len(fields) > 60 and fields[60]:
+            try:
+                lot_size = int(fields[60])
+            except Exception:
+                pass
         
         if last_price <= 0:
             return None
@@ -109,6 +107,9 @@ def get_stock_snapshot_tencent(sec_code, debug=False):
         return None
 
 def get_20d_avg_turnover_tencent(sec_code):
+    """
+    騰訊財經公開K線接口：20日均成交額（港元）
+    """
     tencent_code = f"hk{sec_code}"
     url = f"https://web.ifzq.gtimg.cn/appstock/app/kline/kline?param={tencent_code},day,,,20,"
     try:
@@ -139,11 +140,13 @@ def get_20d_avg_turnover_tencent(sec_code):
                 if len(k) >= 6:
                     volume = float(k[5]) if k[5] else 0
                     close = float(k[2]) if k[2] else 0
+                    # 騰訊日K線第7個字段為成交額（如有）
                     if len(k) >= 7 and k[6]:
                         turnover = float(k[6])
                         if turnover > 10000:
                             turnovers.append(turnover)
                             continue
+                    # 否則 成交量×收盤價
                     if volume > 0 and close > 0:
                         turnovers.append(volume * close)
             except Exception:
@@ -156,6 +159,9 @@ def get_20d_avg_turnover_tencent(sec_code):
         return 0.0
 
 def get_annual_dividend(sec_code):
+    """
+    東方財富datacenter接口：過去12個月總派息
+    """
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     one_year_ago = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
     today = datetime.now().strftime("%Y-%m-%d")
@@ -266,6 +272,7 @@ def main():
     filtered_cap = 0
     filtered_yield = 0
     filtered_turnover = 0
+    filtered_lot = 0
     
     for idx, item in enumerate(div_records):
         raw_code = str(item.get("SECURITY_CODE", "")).zfill(5)
@@ -277,12 +284,7 @@ def main():
             continue
         dividend_hkd = float(dividend_hkd)
         
-        # 頭2隻打印詳細字段調試
-        debug_mode = idx < 2
-        if debug_mode:
-            print(f"\n[DEBUG] 處理: {name} ({raw_code}), 每股派息: {dividend_hkd}")
-        
-        snap = get_stock_snapshot_tencent(raw_code, debug=debug_mode)
+        snap = get_stock_snapshot_tencent(raw_code)
         if not snap:
             snap_fail += 1
             continue
@@ -297,31 +299,24 @@ def main():
         last_price = snap["last_price"]
         lot_size = snap["lot_size"]
         
-        if debug_mode:
-            print(f"  [DEBUG] 解析結果: 股價={last_price:.3f}, 市值={market_cap/1e8:.2f}億, 每手={lot_size}股, 20日均額={avg_turnover/1e4:.0f}萬")
-        
         if market_cap < 5_000_000_000:
             filtered_cap += 1
-            if debug_mode:
-                print(f"  [DEBUG] 因市值<50億被過濾")
             continue
             
-        if last_price <= 0 or lot_size <= 0:
-            if debug_mode:
-                print(f"  [DEBUG] 股價或每手無效")
+        if last_price <= 0:
+            continue
+        
+        if lot_size <= 0:
+            filtered_lot += 1
             continue
             
         yield_pct = (dividend_hkd / last_price) * 100.0
         if yield_pct < 3.0:
             filtered_yield += 1
-            if debug_mode:
-                print(f"  [DEBUG] 因收益率{yield_pct:.2f}%<3%被過濾")
             continue
             
         if avg_turnover > 0 and avg_turnover < 30_000_000:
             filtered_turnover += 1
-            if debug_mode:
-                print(f"[DEBUG] 因成交額不足被過濾")
             continue
         
         annual_total_div = get_annual_dividend(raw_code)
@@ -346,6 +341,7 @@ def main():
     print(f"行情快照成功: {snap_success} 隻，失敗: {snap_fail} 隻")
     print(f"K線成交額成功: {turnover_success} 隻")
     print(f"市值過濾淘汰: {filtered_cap} 隻")
+    print(f"每手股數缺失: {filtered_lot} 隻")
     print(f"收益率過濾淘汰: {filtered_yield} 隻")
     print(f"成交額過濾淘汰: {filtered_turnover} 隻")
     print(f"符合所有篩選條件: {len(results)} 隻")
