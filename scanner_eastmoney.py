@@ -363,7 +363,6 @@ def get_20d_avg_turnover_tencent(sec_code):
 def get_annual_dividend_eastmoney(sec_code):
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     one_year_ago = (get_hkt_now() - timedelta(days=365)).strftime("%Y-%m-%d")
-    # 修復：上限放寬至未來30天，確保涵蓋本次即將除淨嘅派息
     future_date = (get_hkt_now() + timedelta(days=30)).strftime("%Y-%m-%d")
     total_div = 0.0
     page = 1
@@ -421,8 +420,8 @@ def push_to_feishu_card(df, start_date, end_date, generate_dt):
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    # [修改] 顯示條件改為：市值>30億｜20日均額>500萬
-                    "content": f"生成時間：`{generate_dt}`\n掃描區間：`{start_date}` ~ `{end_date}`\n篩選：市值>30億｜20日均額>500萬｜本次收益率>=7%｜年度週息率>=4%\n數據源：港交所披露易 + 騰訊財經 + 東方財富"
+                    # [修改] 將說明文字中的成交額門檻改為 > 300 萬
+                    "content": f"生成時間：`{generate_dt}`\n掃描區間：`{start_date}` ~ `{end_date}`\n篩選：市值>30億｜20日均額>300萬｜本次收益率>=7%｜年度週息率>=4%\n數據源：港交所披露易 + 騰訊財經 + 東方財富"
                 }
             },
             {"tag": "hr"}
@@ -509,7 +508,6 @@ def main():
     div_records = get_dividend_calendar_hkex(start_date, end_date)
     print(f"港交所披露易返回 {len(div_records)} 條現金派息記錄")
 
-    # 修復：空列表代表該區間真的冇派息記錄，推送正常藍色卡片
     if not div_records:
         print("該區間內未獲取到分紅記錄。")
         push_to_feishu_card(pd.DataFrame(), start_date, end_date, generate_datetime)
@@ -556,7 +554,6 @@ def main():
         last_price = snap["last_price"]
         lot_size = snap["lot_size"]
 
-        # [修改] 市值門檻改為小於 30 億淘汰
         if market_cap < 3_000_000_000:
             filtered_cap += 1
             continue
@@ -571,8 +568,8 @@ def main():
             filtered_yield += 1
             continue
 
-        # [修改] 成交額門檻改為小於 500 萬淘汰
-        if avg_turnover > 0 and avg_turnover < 5_000_000:
+        # [修改] 成交額門檻改為小於 300 萬淘汰
+        if avg_turnover > 0 and avg_turnover < 3_000_000:
             filtered_turnover += 1
             continue
 
@@ -614,8 +611,8 @@ def main():
     print(f"市值過濾淘汰: {filtered_cap} 隻")
     print(f"每手股數缺失: {filtered_lot} 隻")
     print(f"單次收益率<7%淘汰: {filtered_yield} 隻")
-    # [修改] 終端機日誌描述同步修改
-    print(f"成交額<500萬淘汰: {filtered_turnover} 隻")
+    # [修改] 終端機日誌描述同步改為 300 萬
+    print(f"成交額<300萬淘汰: {filtered_turnover} 隻")
     print(f"年度週息率<4%淘汰: {filtered_annual} 隻")
     print(f"今日已除淨跳過: {filtered_ex_today} 隻")
     print(f"符合所有篩選條件: {len(results)} 隻")
