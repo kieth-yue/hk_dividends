@@ -363,7 +363,6 @@ def get_20d_avg_turnover_tencent(sec_code):
 def get_annual_dividend_eastmoney(sec_code):
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     one_year_ago = (get_hkt_now() - timedelta(days=365)).strftime("%Y-%m-%d")
-    # 修復：上限放寬至未來30天，確保涵蓋本次即將除淨嘅派息
     future_date = (get_hkt_now() + timedelta(days=30)).strftime("%Y-%m-%d")
     total_div = 0.0
     page = 1
@@ -421,8 +420,8 @@ def push_to_feishu_card(df, start_date, end_date, generate_dt):
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    # [修改] 顯示條件改為 OR 邏輯
-                    "content": f"生成時間：`{generate_dt}`\n掃描區間：`{start_date}` ~ `{end_date}`\n篩選：市值>30億｜20日均額>300萬｜本次收益率>=7% 或 年度週息率>=4%\n數據源：港交所披露易 + 騰訊財經 + 東方財富"
+                    # [修改] 卡片說明移除年度週息率要求，只保留本次收益率>=7%
+                    "content": f"生成時間：`{generate_dt}`\n掃描區間：`{start_date}` ~ `{end_date}`\n篩選：市值>30億｜20日均額>300萬｜本次收益率>=7%\n數據源：港交所披露易 + 騰訊財經 + 東方財富"
                 }
             },
             {"tag": "hr"}
@@ -522,7 +521,7 @@ def main():
     filtered_yield = 0
     filtered_turnover = 0
     filtered_lot = 0
-    filtered_annual = 0
+    # [修改] 移除了 filtered_annual 變量
     filtered_ex_today = 0
     timeout_triggered = False
 
@@ -565,8 +564,8 @@ def main():
             continue
 
         yield_pct = (dividend_hkd / last_price) * 100.0
-        # [修改] 恢復為 1% 的基礎過濾，避免推播 0.01% 的極小額派息
-        if yield_pct < 1.0:
+        # [修改] 嚴格要求本次收益率 >= 7%，小於則淘汰
+        if yield_pct < 7.0:
             filtered_yield += 1
             continue
 
@@ -577,10 +576,7 @@ def main():
         annual_total_div = get_annual_dividend_eastmoney(raw_code)
         annual_yield_pct = (annual_total_div / last_price) * 100.0 if annual_total_div > 0 else 0.0
         
-        # [修改] 核心 OR 邏輯：只有當「單次 < 7%」且「年度 < 4%」同時發生時，才將其淘汰
-        if yield_pct < 7.0 and annual_yield_pct < 4.0:
-            filtered_annual += 1
-            continue
+        # [修改] 完全移除年度週息率的過濾淘汰邏輯，保留變量供卡片顯示用
 
         ex_date_obj = datetime.strptime(ex_date_str, "%Y-%m-%d").date()
         days_to_ex = (ex_date_obj - today_date).days
@@ -613,11 +609,10 @@ def main():
     print(f"K線成交額成功: {turnover_success} 隻")
     print(f"市值過濾淘汰: {filtered_cap} 隻")
     print(f"每手股數缺失: {filtered_lot} 隻")
-    # [修改] 同步日誌提示
-    print(f"單次收益率<1%淘汰: {filtered_yield} 隻")
+    # [修改] 同步日誌提示，改為單次收益率<7%淘汰
+    print(f"單次收益率<7%淘汰: {filtered_yield} 隻")
     print(f"成交額<300萬淘汰: {filtered_turnover} 隻")
-    # [修改] 同步日誌提示
-    print(f"收益率雙重未達標(單次<7%且年度<4%)淘汰: {filtered_annual} 隻")
+    # [修改] 移除了年度過濾相關的 print 日誌
     print(f"今日已除淨跳過: {filtered_ex_today} 隻")
     print(f"符合所有篩選條件: {len(results)} 隻")
 
