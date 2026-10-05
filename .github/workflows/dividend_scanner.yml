@@ -23,9 +23,9 @@ jobs:
         run: |
           pip install requests pandas beautifulsoup4
 
-      - name: Random delay (0-10 min)
+      - name: Random delay (0-5 min)
         run: |
-          DELAY=$((RANDOM % 600))
+          DELAY=$((RANDOM % 300))
           echo "隨機等待 ${DELAY} 秒..."
           sleep ${DELAY}
 
