@@ -421,8 +421,8 @@ def push_to_feishu_card(df, start_date, end_date, generate_dt):
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    # [修改] 顯示條件改為：本次收益率>=7%｜年度週息率>=4%
-                    "content": f"生成時間：`{generate_dt}`\n掃描區間：`{start_date}` ~ `{end_date}`\n篩選：市值>50億｜20日均額>1000萬｜本次收益率>=7%｜年度週息率>=4%\n數據源：港交所披露易 + 騰訊財經 + 東方財富"
+                    # [修改] 顯示條件改為：市值>30億｜20日均額>500萬
+                    "content": f"生成時間：`{generate_dt}`\n掃描區間：`{start_date}` ~ `{end_date}`\n篩選：市值>30億｜20日均額>500萬｜本次收益率>=7%｜年度週息率>=4%\n數據源：港交所披露易 + 騰訊財經 + 東方財富"
                 }
             },
             {"tag": "hr"}
@@ -556,7 +556,8 @@ def main():
         last_price = snap["last_price"]
         lot_size = snap["lot_size"]
 
-        if market_cap < 5_000_000_000:
+        # [修改] 市值門檻改為小於 30 億淘汰
+        if market_cap < 3_000_000_000:
             filtered_cap += 1
             continue
         if last_price <= 0:
@@ -566,18 +567,17 @@ def main():
             continue
 
         yield_pct = (dividend_hkd / last_price) * 100.0
-        # [修改] 本次收益率過濾門檻改為小於 7% 淘汰
         if yield_pct < 7.0:
             filtered_yield += 1
             continue
 
-        if avg_turnover > 0 and avg_turnover < 10_000_000:
+        # [修改] 成交額門檻改為小於 500 萬淘汰
+        if avg_turnover > 0 and avg_turnover < 5_000_000:
             filtered_turnover += 1
             continue
 
         annual_total_div = get_annual_dividend_eastmoney(raw_code)
         annual_yield_pct = (annual_total_div / last_price) * 100.0 if annual_total_div > 0 else 0.0
-        # [修改] 年度週息率過濾門檻改為小於 4% 淘汰
         if annual_yield_pct < 4.0:
             filtered_annual += 1
             continue
@@ -613,10 +613,9 @@ def main():
     print(f"K線成交額成功: {turnover_success} 隻")
     print(f"市值過濾淘汰: {filtered_cap} 隻")
     print(f"每手股數缺失: {filtered_lot} 隻")
-    # [修改] 終端機日誌描述同步修改
     print(f"單次收益率<7%淘汰: {filtered_yield} 隻")
-    print(f"成交額<1000萬淘汰: {filtered_turnover} 隻")
     # [修改] 終端機日誌描述同步修改
+    print(f"成交額<500萬淘汰: {filtered_turnover} 隻")
     print(f"年度週息率<4%淘汰: {filtered_annual} 隻")
     print(f"今日已除淨跳過: {filtered_ex_today} 隻")
     print(f"符合所有篩選條件: {len(results)} 隻")
