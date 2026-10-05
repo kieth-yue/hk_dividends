@@ -66,7 +66,7 @@ def http_post_with_retry(url, json_data, headers=None, timeout=10):
     raise last_exception if last_exception else Exception("Unknown request error")
 
 def normalize_name(name):
-    name = name.replace("　", " ").strip()
+    name = name.replace(" ", " ").strip()
     result = ""
     for ch in name:
         code = ord(ch)
@@ -87,7 +87,7 @@ def is_excluded_stock(code, name):
     return False
 
 def parse_dividend_amount(text):
-    text = text.replace(" ", "").replace("　", "")
+    text = text.replace(" ", "").replace(" ", "")
 
     hkd_patterns = [
         (r"中期股息([\d.]+)港仙", 0.01, True),
@@ -421,7 +421,8 @@ def push_to_feishu_card(df, start_date, end_date, generate_dt):
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"生成時間：`{generate_dt}`\n掃描區間：`{start_date}` ~ `{end_date}`\n篩選：市值>50億｜20日均額>1000萬｜年度週息率>5%\n數據源：港交所披露易 + 騰訊財經 + 東方財富"
+                    # [修改] 顯示條件改為：本次收益率>=7%｜年度週息率>=4%
+                    "content": f"生成時間：`{generate_dt}`\n掃描區間：`{start_date}` ~ `{end_date}`\n篩選：市值>50億｜20日均額>1000萬｜本次收益率>=7%｜年度週息率>=4%\n數據源：港交所披露易 + 騰訊財經 + 東方財富"
                 }
             },
             {"tag": "hr"}
@@ -500,7 +501,7 @@ def get_trading_day_range(days=7):
 
 def main():
     script_start_time = time.time()
-    start_date, end_date, today_date = get_trading_day_range(7)
+    start_date, end_date, today_date = get_trading_day_range(10)
     generate_datetime = get_hkt_now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"開始掃描除淨區間(跳週六日, HKT): {start_date} -> {end_date}")
     print(f"全局超時限制: {MAX_RUNTIME_SECONDS}秒（{MAX_RUNTIME_SECONDS // 60}分鐘）")
@@ -565,7 +566,8 @@ def main():
             continue
 
         yield_pct = (dividend_hkd / last_price) * 100.0
-        if yield_pct < 1.0:
+        # [修改] 本次收益率過濾門檻改為小於 7% 淘汰
+        if yield_pct < 7.0:
             filtered_yield += 1
             continue
 
@@ -575,7 +577,8 @@ def main():
 
         annual_total_div = get_annual_dividend_eastmoney(raw_code)
         annual_yield_pct = (annual_total_div / last_price) * 100.0 if annual_total_div > 0 else 0.0
-        if annual_yield_pct < 5.0:
+        # [修改] 年度週息率過濾門檻改為小於 4% 淘汰
+        if annual_yield_pct < 4.0:
             filtered_annual += 1
             continue
 
@@ -610,9 +613,11 @@ def main():
     print(f"K線成交額成功: {turnover_success} 隻")
     print(f"市值過濾淘汰: {filtered_cap} 隻")
     print(f"每手股數缺失: {filtered_lot} 隻")
-    print(f"單次收益率<1%淘汰: {filtered_yield} 隻")
+    # [修改] 終端機日誌描述同步修改
+    print(f"單次收益率<7%淘汰: {filtered_yield} 隻")
     print(f"成交額<1000萬淘汰: {filtered_turnover} 隻")
-    print(f"年度週息率<5%淘汰: {filtered_annual} 隻")
+    # [修改] 終端機日誌描述同步修改
+    print(f"年度週息率<4%淘汰: {filtered_annual} 隻")
     print(f"今日已除淨跳過: {filtered_ex_today} 隻")
     print(f"符合所有篩選條件: {len(results)} 隻")
 
